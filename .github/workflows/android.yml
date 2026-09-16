@@ -24,9 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------------
-      # 0. Checkout (with submodules)
-      # ---------------------------------------------------------------
+      # 0. Checkout
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -34,18 +32,13 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------------------------------------------------------------
-      # Extra safety: force init/update submodules (nested)
-      # ---------------------------------------------------------------
       - name: Sync submodules
         run: |
           git submodule sync --recursive
           git submodule update --init --recursive --depth 1 || \
           git submodule update --init --recursive
 
-      # ---------------------------------------------------------------
-      # Setup JDK 17
-      # ---------------------------------------------------------------
+      # 1. Setup JDK 17
       - name: Setup JDK 17
         uses: actions/setup-java@v5
         with:
@@ -53,24 +46,19 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      # ---------------------------------------------------------------
-      # 1. Detect required Gradle version from project files
-      # ---------------------------------------------------------------
+      # 2. Detect Gradle version
       - name: Detect Gradle version required by AGP
         id: gradle-ver
         run: |
           WRAPPER_PROPS="gradle/wrapper/gradle-wrapper.properties"
           GRADLE_VER=""
-
           if [ -f "$WRAPPER_PROPS" ]; then
             GRADLE_VER=$(grep -oP 'gradle-\K[0-9]+\.[0-9]+(\.[0-9]+)?(?=-bin)' "$WRAPPER_PROPS" | head -n1)
           fi
-
           if [ -z "$GRADLE_VER" ]; then
             AGP_VER=$(grep -rhoP "com\.android\.tools\.build:gradle:\K[0-9]+\.[0-9]+(\.[0-9]+)?" \
               build.gradle build.gradle.kts settings.gradle settings.gradle.kts \
               app/build.gradle app/build.gradle.kts 2>/dev/null | head -n1)
-
             if [ -n "$AGP_VER" ]; then
               AGP_MAJOR=$(echo "$AGP_VER" | cut -d. -f1)
               case "$AGP_MAJOR" in
@@ -81,65 +69,49 @@ jobs:
               esac
             fi
           fi
-
           if [ -z "$GRADLE_VER" ]; then
             GRADLE_VER="9.7.1"
           fi
-
           echo "Using Gradle version: $GRADLE_VER"
           echo "version=$GRADLE_VER" >> "$GITHUB_OUTPUT"
 
-      # ---------------------------------------------------------------
-      # 2. Setup Android SDK (platform-tools only)
-      # ---------------------------------------------------------------
+      # 3. Setup Android SDK + NDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: 'platform-tools'
+          packages: 'platform-tools ndk;25.2.9519653'
           accept-android-sdk-licenses: true
 
-      # ---------------------------------------------------------------
-      # 3. Setup required Gradle version
-      # ---------------------------------------------------------------
+      # 4. Setup Gradle
       - name: Setup Gradle ${{ steps.gradle-ver.outputs.version }}
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ steps.gradle-ver.outputs.version }}
 
-      # ---------------------------------------------------------------
-      # 4. Ensure Gradle wrapper exists and matches required version
-      # ---------------------------------------------------------------
+      # 5. Ensure Gradle wrapper
       - name: Ensure Gradle wrapper
         run: |
           GRADLE_VER="${{ steps.gradle-ver.outputs.version }}"
-
           if [ -f "./gradlew" ] && [ -f "./gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "Wrapper found. Updating distributionUrl to gradle-${GRADLE_VER}-bin.zip"
             sed -i "s|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-${GRADLE_VER}-bin.zip|" \
               gradle/wrapper/gradle-wrapper.properties
           else
-            echo "No wrapper found. Generating with Gradle ${GRADLE_VER}"
             gradle wrapper --gradle-version "$GRADLE_VER" --distribution-type bin
           fi
           chmod +x ./gradlew
           ./gradlew --version
 
-      # ---------------------------------------------------------------
-      # 5. Generate debug.keystore in project root
-      # ---------------------------------------------------------------
+      # 6. Generate debug.keystore
       - name: Generate debug.keystore
         if: ${{ github.event.inputs.build_type != 'release' }}
         run: |
           KEYSTORE_PATH="$GITHUB_WORKSPACE/debug.keystore"
-
           if [ -f "$KEYSTORE_PATH" ]; then
             echo "debug.keystore already exists, skipping."
             exit 0
           fi
-
           mkdir -p "$HOME/.android"
           chmod u+w "$HOME/.android" 2>/dev/null || true
-
           keytool -genkey -v \
             -keystore "$KEYSTORE_PATH" \
             -alias androiddebugkey \
@@ -147,12 +119,9 @@ jobs:
             -validity 10000 \
             -storepass android -keypass android \
             -dname "CN=Android Debug,O=Android,C=US"
-
           echo "Created debug.keystore at $KEYSTORE_PATH"
 
-      # ---------------------------------------------------------------
-      # 6. Optional: decode release keystore from secrets
-      # ---------------------------------------------------------------
+      # 7. Decode release keystore (optional)
       - name: Decode release keystore
         if: ${{ github.event.inputs.build_type == 'release' }}
         env:
@@ -165,9 +134,29 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
           echo "Release keystore decoded."
 
-      # ---------------------------------------------------------------
-      # 7. Determine build variant
-      # ---------------------------------------------------------------
+      # 8. Initialize VLC source (★ KEY FIX)
+      - name: Initialize VLC source
+        env:
+          ANDROID_SDK: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK: ${{ env.ANDROID_NDK_ROOT }}
+        run: |
+          export ANDROID_SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export ANDROID_NDK="${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+
+          if [ ! -d "libvlcjni/libvlc" ]; then
+            echo "libvlcjni/libvlc missing. Running compile.sh --init..."
+            chmod +x buildsystem/compile.sh buildsystem/get-vlc.sh
+            ./buildsystem/compile.sh --init -a arm64-v8a
+          else
+            echo "libvlcjni/libvlc already present, skipping init."
+          fi
+
+          if [ ! -d "libvlcjni/libvlc" ]; then
+            echo "ERROR: libvlcjni/libvlc still missing after compile.sh --init"
+            exit 1
+          fi
+
+      # 9. Determine build variant
       - name: Determine build variant
         id: variant
         run: |
@@ -177,45 +166,35 @@ jobs:
             echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
           fi
 
-      # ---------------------------------------------------------------
-      # 8. Build APK
-      # ---------------------------------------------------------------
+      # 10. Build APK
       - name: Build APK
         run: |
           TASK="${{ steps.variant.outputs.task }}"
-
           if ./gradlew tasks --all 2>/dev/null | grep -q "^${TASK}"; then
             ./gradlew "$TASK" --stacktrace --no-daemon
           else
             ./gradlew ":app:${TASK}" --stacktrace --no-daemon
           fi
 
-      # ---------------------------------------------------------------
-      # 9. Prepare APK for release
-      # ---------------------------------------------------------------
+      # 11. Prepare APK
       - name: Prepare APK
         id: apk
         run: |
           APK_PATH=$(find . -path "*/build/outputs/apk/*/*.apk" | head -n1)
-
           if [ -z "$APK_PATH" ]; then
             echo "No APK found!"
             find . -path "*/build/outputs/*" -type f 2>/dev/null || true
             exit 1
           fi
-
           BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
           TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
           NEW_NAME="app-${BUILD_TYPE}-${TIMESTAMP}-run${{ github.run_number }}.apk"
-
           cp "$APK_PATH" "$NEW_NAME"
           echo "apk_path=$NEW_NAME" >> "$GITHUB_OUTPUT"
           echo "tag=build-${{ github.run_number }}-${TIMESTAMP}" >> "$GITHUB_OUTPUT"
           echo "Built: $NEW_NAME"
 
-      # ---------------------------------------------------------------
-      # 10. Upload artifact
-      # ---------------------------------------------------------------
+      # 12. Upload artifact
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -223,9 +202,7 @@ jobs:
           if-no-files-found: error
           path: ${{ steps.apk.outputs.apk_path }}
 
-      # ---------------------------------------------------------------
-      # 11. Create GitHub Release
-      # ---------------------------------------------------------------
+      # 13. Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
