@@ -46,7 +46,43 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      # 2. Detect Gradle version
+      # 2. Setup Android SDK + NDK  (★ NDK আগেই লাগবে)
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools ndk;25.2.9519653'
+          accept-android-sdk-licenses: true
+
+      # 3. ★ Initialize VLC source BEFORE any Gradle command
+      - name: Initialize VLC source
+        env:
+          ANDROID_SDK: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK: ${{ env.ANDROID_NDK_ROOT }}
+        run: |
+          export ANDROID_SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          export ANDROID_NDK="${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
+          echo "ANDROID_SDK=$ANDROID_SDK"
+          echo "ANDROID_NDK=$ANDROID_NDK"
+
+          if [ ! -d "libvlcjni/libvlc" ]; then
+            echo "libvlcjni/libvlc missing. Running compile.sh --init..."
+            chmod +x buildsystem/compile.sh buildsystem/get-vlc.sh
+            # --init শুধু VLC source clone করে, build করে না
+            ./buildsystem/compile.sh --init -a arm64-v8a || true
+          fi
+
+          # Fallback: যদি compile.sh --init কাজ না করে, ম্যানুয়ালি clone
+          if [ ! -d "libvlcjni/libvlc" ] || [ -z "$(ls -A libvlcjni/libvlc 2>/dev/null)" ]; then
+            echo "Fallback: manual clone of VLC"
+            rm -rf libvlcjni/libvlc
+            mkdir -p libvlcjni/libvlc
+            git clone --depth 1 https://code.videolan.org/videolan/vlc.git libvlcjni/libvlc
+          fi
+
+          # Final verification
+          test -d libvlcjni/libvlc || { echo "ERROR: libvlcjni/libvlc missing"; exit 1; }
+
+      # 4. Detect Gradle version
       - name: Detect Gradle version required by AGP
         id: gradle-ver
         run: |
@@ -75,20 +111,13 @@ jobs:
           echo "Using Gradle version: $GRADLE_VER"
           echo "version=$GRADLE_VER" >> "$GITHUB_OUTPUT"
 
-      # 3. Setup Android SDK + NDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools ndk;25.2.9519653'
-          accept-android-sdk-licenses: true
-
-      # 4. Setup Gradle
+      # 5. Setup Gradle
       - name: Setup Gradle ${{ steps.gradle-ver.outputs.version }}
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: ${{ steps.gradle-ver.outputs.version }}
 
-      # 5. Ensure Gradle wrapper
+      # 6. Ensure Gradle wrapper
       - name: Ensure Gradle wrapper
         run: |
           GRADLE_VER="${{ steps.gradle-ver.outputs.version }}"
@@ -99,9 +128,10 @@ jobs:
             gradle wrapper --gradle-version "$GRADLE_VER" --distribution-type bin
           fi
           chmod +x ./gradlew
-          ./gradlew --version
+          # ★ --version বাদ দিলাম, কারণ এটা settings.gradle evaluate করে
+          # ./gradlew --version
 
-      # 6. Generate debug.keystore
+      # 7. Generate debug.keystore
       - name: Generate debug.keystore
         if: ${{ github.event.inputs.build_type != 'release' }}
         run: |
@@ -121,7 +151,7 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
           echo "Created debug.keystore at $KEYSTORE_PATH"
 
-      # 7. Decode release keystore (optional)
+      # 8. Decode release keystore (optional)
       - name: Decode release keystore
         if: ${{ github.event.inputs.build_type == 'release' }}
         env:
@@ -133,28 +163,6 @@ jobs:
           fi
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
           echo "Release keystore decoded."
-
-      # 8. Initialize VLC source (★ KEY FIX)
-      - name: Initialize VLC source
-        env:
-          ANDROID_SDK: ${{ env.ANDROID_SDK_ROOT }}
-          ANDROID_NDK: ${{ env.ANDROID_NDK_ROOT }}
-        run: |
-          export ANDROID_SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          export ANDROID_NDK="${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}"
-
-          if [ ! -d "libvlcjni/libvlc" ]; then
-            echo "libvlcjni/libvlc missing. Running compile.sh --init..."
-            chmod +x buildsystem/compile.sh buildsystem/get-vlc.sh
-            ./buildsystem/compile.sh --init -a arm64-v8a
-          else
-            echo "libvlcjni/libvlc already present, skipping init."
-          fi
-
-          if [ ! -d "libvlcjni/libvlc" ]; then
-            echo "ERROR: libvlcjni/libvlc still missing after compile.sh --init"
-            exit 1
-          fi
 
       # 9. Determine build variant
       - name: Determine build variant
